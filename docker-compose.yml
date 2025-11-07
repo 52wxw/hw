@@ -1,0 +1,126 @@
+version: '3.8'
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PWD}
+      MYSQL_DATABASE: ai_inspect
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  device-service:
+    build: ./device-service
+    ports:
+      - "8000:8000"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/ai_inspect
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=${MYSQL_ROOT_PWD}
+      - ENCRYPT_KEY=${FERNET_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  collect-service:
+    build: ./collect-service
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+      - device-service
+
+  ai-service:
+    build: ./ai-service
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_URL=${OLLAMA_URL}
+      - COLLECT_SERVICE_URL=http://collect-service:8001
+    depends_on:
+      - redis
+      - collect-service
+
+  scheduler-service:
+    build: ./scheduler-service
+    ports:
+      - "8003:8003"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PWD}
+      - MYSQL_DATABASE=ai_inspect
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - COLLECT_SERVICE_URL=http://collect-service:8001
+      - AI_SERVICE_URL=http://ai-service:8002
+    depends_on:
+      - mysql
+      - device-service
+      - collect-service
+      - ai-service
+
+  alert-service:
+    build: ./alert-service
+    ports:
+      - "8004:8004"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PWD}
+      - MYSQL_DATABASE=ai_inspect
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - FROM_EMAIL=${FROM_EMAIL}
+      - WECHAT_WEBHOOK=${WECHAT_WEBHOOK}
+      - DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
+    depends_on:
+      - mysql
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - device-service
+      - ai-service
+      - scheduler-service
+      - alert-service
+
+volumes:
+  mysql_data:
+  redis_data:
+  rabbitmq_data:
